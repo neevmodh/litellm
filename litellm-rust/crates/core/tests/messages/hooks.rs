@@ -186,7 +186,7 @@ fn hooked(call: MessagesCall, api_base: String, extra: Value) -> MessagesCall {
 }
 
 async fn run_hooked(host: &HookingHost) -> Result<MessagesOutput, Error> {
-    litellm_host::run::run(messages_machine(Arc::new(RecordingSecrets::empty())), host).await
+    litellm_host::run::run(machine(Arc::new(RecordingSecrets::empty())), host).await
 }
 
 async fn message_through(host: &HookingHost) -> AnthropicMessagesResponse {

@@ -19,6 +19,7 @@ use litellm_core::messages::{
     types::MessagesShaping,
 };
 use litellm_host_python::{InvokeError, ProtocolHost, json_fields, to_py};
+use litellm_http::{HttpClientPool, HttpSettings, Resolution, media::PublicDnsResolver};
 use litellm_secrets::{SecretValue, source::SecretSource};
 use pyo3::{
     gc::{PyTraverseError, PyVisit},
@@ -165,7 +166,12 @@ impl Invoke {
                 &PyTuple::empty(py),
                 self.kwargs.bind(py),
             )?,
-            messages_machine(Arc::new(NoSecrets)),
+            messages_machine(
+                &HttpClientPool::new(Arc::new(PublicDnsResolver)),
+                &Resolution::from(&HttpSettings::default()).config,
+                Arc::new(NoSecrets),
+            )
+            .unwrap(),
             MessagesHost {
                 error: self.error.clone_ref(py),
             },

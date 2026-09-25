@@ -17,6 +17,7 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyDict},
 };
+use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
 
 use crate::{
@@ -39,6 +40,13 @@ fn merge_headers(
     (!merged.is_empty()).then_some(merged)
 }
 
+fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect()
+}
+
 fn native_error(py: Python<'_>, error: Error) -> PyResult<PyErr> {
     match error {
         Error::Transport(TransportError::Http { status, body }) => {
@@ -50,6 +58,13 @@ fn native_error(py: Python<'_>, error: Error) -> PyResult<PyErr> {
         }
         Error::InvalidRequest(message) => {
             let error = PyValueError::new_err(message);
+            error.value(py).setattr(REQUEST_ERROR_MARKER, true)?;
+            Ok(error)
+        }
+        error @ (Error::AlreadyProjected
+        | Error::RequestDecoding(_)
+        | Error::RequestEncoding(_)) => {
+            let error = PyValueError::new_err(error.to_string());
             error.value(py).setattr(REQUEST_ERROR_MARKER, true)?;
             Ok(error)
         }
@@ -227,7 +242,7 @@ impl ProtocolHost for MessagesPythonHost {
     fn head(&mut self, py: Python<'_>, head: MessagesStreamHead) -> PyResult<Py<PyAny>> {
         py.import(ROUTE_HOST_MODULE)?
             .getattr("stream_hidden_params")?
-            .call1((to_py(py, &head.headers)?,))
+            .call1((to_py(py, &header_pairs(&head.headers))?,))
             .map(Bound::unbind)
     }
 
@@ -304,8 +319,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn header_pairs_drop_opaque_values_and_keep_duplicates() {
+        let mut headers = HeaderMap::new();
+        headers.append("X-Multi", "a".parse().unwrap());
+        headers.append("X-Multi", "b".parse().unwrap());
+        headers.append(
+            "x-opaque",
+            reqwest::header::HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+        assert_eq!(
+            header_pairs(&headers),
+            vec![
+                ("x-multi".to_string(), "a".to_string()),
+                ("x-multi".to_string(), "b".to_string())
+            ]
+        );
+    }
+
     #[rstest]
     #[case::rejected_request(Error::InvalidRequest("does not support top_k=5".into()), true)]
+    #[case::request_decoding(
+        Error::RequestDecoding(serde_json::from_str::<()>("{").unwrap_err().into()),
+        true,
+    )]
+    #[case::response_decoding(
+        Error::ResponseDecoding(serde_json::from_str::<()>("{").unwrap_err().into()),
+        false,
+    )]
     #[case::unresolvable_provider(Error::InvalidProvider("openai".into()), false)]
     #[case::upstream_failure(
         Error::Transport(TransportError::Http { status: 400, body: "bad".into() }),

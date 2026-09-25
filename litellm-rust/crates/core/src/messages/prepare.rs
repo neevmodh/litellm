@@ -116,9 +116,7 @@ pub(super) fn prepare_provider_request(
     })
 }
 
-pub(super) fn invalid_request(err: serde_json::Error) -> Error {
-    Error::InvalidRequest(format!("invalid Anthropic messages request: {err}"))
-}
+
 
 fn without_additional_drop_params(
     request: AnthropicMessagesRequest,
@@ -127,12 +125,12 @@ fn without_additional_drop_params(
     if paths.is_empty() {
         return Ok(request);
     }
-    let params = serde_json::to_value(request.params).map_err(invalid_request)?;
+    let params = serde_json::to_value(request.params).map_err(|e| Error::RequestEncoding(e.into()))?;
     let trimmed = paths
         .iter()
         .fold(params, |params, path| delete_nested_value(params, path));
     Ok(AnthropicMessagesRequest {
-        params: serde_json::from_value(trimmed).map_err(invalid_request)?,
+        params: serde_json::from_value(trimmed).map_err(|e| Error::RequestDecoding(e.into()))?,
         ..request
     })
 }
@@ -450,5 +448,49 @@ mod tests {
                 "metadata.user_id must be a string, got 123".to_string()
             ))
         );
+    }
+
+    #[rstest]
+    #[case::streaming(json!({"stream": true}), true)]
+    #[case::explicitly_off(json!({"stream": false}), false)]
+    #[case::unset(json!({}), false)]
+    fn prepared_request_reports_whether_it_streams(
+        shaping: MessagesShaping,
+        #[case] extra: Value,
+        #[case] expected: bool,
+    ) {
+        let body = [
+            ("model", json!("claude-test")),
+            ("messages", json!([{"role": "user", "content": "hi"}])),
+            ("max_tokens", json!(16)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .chain(extra.as_object().cloned().unwrap_or_default())
+        .collect();
+        let prepared = prepare(MessagesRequest {
+            model: "claude-test",
+            body,
+            api_key: Some("sk-test"),
+            api_base: Some("https://anthropic.test"),
+            custom_llm_provider: Some("anthropic"),
+            extra_headers: None,
+            provider_specific_header: None,
+            timeout: None,
+            shaping,
+        })
+        .unwrap();
+        assert_eq!(prepared.stream, expected);
+    }
+
+    #[rstest]
+    fn untyped_messages_fail_as_request_decoding(shaping: MessagesShaping) {
+        assert!(matches!(
+            prepared_body(
+                json!({"model": "claude-test", "messages": "nope", "max_tokens": 16}),
+                shaping,
+            ),
+            Err(Error::RequestDecoding(_))
+        ));
     }
 }

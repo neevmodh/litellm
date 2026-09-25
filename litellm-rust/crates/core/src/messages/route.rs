@@ -25,12 +25,13 @@ use litellm_types::{
     },
     utils::ProviderSpecificHeaders,
 };
+use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
 
 use super::{
     Error,
     handler::{decode_response, network, provider_error, send},
-    prepare::{invalid_request, prepare_provider_request, resolve_provider},
+    prepare::{prepare_provider_request, resolve_provider},
     types::MessagesShaping,
 };
 
@@ -74,7 +75,7 @@ pub struct MessagesCall {
 
 /// Parses a caller's raw body, failing the way the route fails for any invalid request.
 pub fn messages_body(body: Map<String, Value>) -> Result<AnthropicMessagesRequest, Error> {
-    serde_json::from_value(Value::Object(body)).map_err(invalid_request)
+    serde_json::from_value(Value::Object(body)).map_err(|e| Error::RequestDecoding(e.into()))
 }
 
 pub enum MessagesOutput {
@@ -85,7 +86,7 @@ pub enum MessagesOutput {
 
 /// The upstream response as the caller sees it at stream hand-off, before any chunk.
 pub struct MessagesStreamHead {
-    pub headers: Vec<(String, String)>,
+    pub headers: HeaderMap,
 }
 
 pub struct Messages;
@@ -122,7 +123,7 @@ impl Host<Messages> for LocalMessagesHost {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take()
-            .ok_or_else(|| Error::InvalidRequest("messages request was already projected".into()))
+            .ok_or(Error::AlreadyProjected)
     }
 
     async fn open(&self, _: MessagesStreamHead) -> Result<Demand, Error> {
@@ -209,7 +210,6 @@ async fn execute(
             api_key: call.api_key.clone().map(SecretValue::new),
         };
         let config = request.provider.config();
-        let provider_name = request.provider.as_str();
         let timeout = request.timeout;
         let env_lookup = |key: &str| std::env::var(key).ok();
         let authenticated = resolve_auth(&auth, request.environment, &env_lookup).await?;
@@ -238,7 +238,7 @@ async fn execute(
             let error = provider_error(response).await;
             if !recovered_thinking
                 && let Some(recovered) =
-                    super::handler::recover_thinking(&error, provider_name, &wire.body)?
+                    super::handler::recover_thinking(&error, request.provider, &wire.body)?
             {
                 body = recovered;
                 recovered_thinking = true;
@@ -282,9 +282,7 @@ fn patched(body: &Map<String, Value>, patch: Map<String, Value>) -> Map<String, 
 }
 
 fn serialize_failure(err: serde_json::Error) -> Error {
-    Error::InvalidRequest(format!(
-        "failed to serialize Anthropic messages request: {err}"
-    ))
+    Error::RequestEncoding(err.into())
 }
 
 /// Hands each upstream chunk to the caller as it arrives. A caller that stops reading
@@ -298,11 +296,7 @@ async fn relay(
     decoder: Option<StreamDecoder>,
 ) -> Result<MessagesOutput, Error> {
     let head = MessagesStreamHead {
-        headers: response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
-            .collect(),
+        headers: response.headers().clone(),
     };
     if host.open(head).await? == Demand::Detached {
         return Ok(MessagesOutput::Streamed);

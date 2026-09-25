@@ -528,3 +528,46 @@ async fn synthetic_thinking_emits_a_signature_delta_only_for_a_nonempty_string(
             .collect();
     assert_eq!(deltas, expected);
 }
+
+#[rstest]
+#[case::text_with_citations(
+    json!({"type": "text", "text": "cited", "citations": [{"type": "char_location", "cited_text": "c"}]}),
+    json!({"type": "text", "text": "", "citations": [{"type": "char_location", "cited_text": "c"}]}),
+    json!({"type": "text_delta", "text": "cited"}),
+)]
+#[case::server_tool_use(
+    json!({"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {"query": "rust"}}),
+    json!({"type": "server_tool_use", "id": "srv-1", "name": "web_search", "input": {}}),
+    json!({"type": "input_json_delta", "partial_json": "{\"query\":\"rust\"}"}),
+)]
+#[tokio::test]
+async fn synthetic_events_keep_block_fields_and_stream_one_delta(
+    call: MessagesCall,
+    #[case] block: Value,
+    #[case] expected_start: Value,
+    #[case] expected_delta: Value,
+) {
+    let body = Value::Object(
+        object(message_body())
+            .into_iter()
+            .chain([("content".into(), json!([block]))])
+            .collect(),
+    );
+    let upstream = upstream([json_response(body)]).await;
+    let host = HookingHost::new(hooked(call, upstream.uri(), json!({"stream": true})))
+        .editing(json!({"stream": false}));
+
+    assert!(matches!(
+        run_hooked(&host).await.unwrap(),
+        MessagesOutput::Streamed
+    ));
+
+    let events: Vec<Value> = host
+        .delivered_text()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    assert_eq!(events[1]["content_block"], expected_start);
+    assert_eq!(events[2]["delta"], expected_delta);
+}

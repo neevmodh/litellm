@@ -39,6 +39,28 @@ mod tests {
     use super::*;
 
     #[rstest]
+    #[case::anthropic("anthropic", Some(MessagesProvider::Anthropic))]
+    #[case::azure_ai("azure_ai", Some(MessagesProvider::AzureAi))]
+    #[case::case_sensitive("Anthropic", None)]
+    #[case::unsupported("openai", None)]
+    fn provider_parses_from_its_name(
+        #[case] name: &str,
+        #[case] expected: Option<MessagesProvider>,
+    ) {
+        assert_eq!(name.parse::<MessagesProvider>().ok(), expected);
+        if let Some(provider) = expected {
+            assert_eq!(provider.name(), name);
+        }
+    }
+
+    #[rstest]
+    #[case::anthropic(MessagesProvider::Anthropic, true)]
+    #[case::azure_ai(MessagesProvider::AzureAi, false)]
+    fn only_anthropic_streams(#[case] provider: MessagesProvider, #[case] streams: bool) {
+        assert_eq!(provider.streams(), streams);
+    }
+
+    #[rstest]
     #[case::nothing_projected(json!({}), MessagesShaping::default())]
     #[case::only_drop_params(
         json!({"drop_params": true}),

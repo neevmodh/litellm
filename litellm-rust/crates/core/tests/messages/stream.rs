@@ -3,6 +3,7 @@ use std::{convert::Infallible, sync::Mutex};
 use bytes::Bytes;
 use litellm_core::messages::route::{Messages, MessagesStreamHead};
 use litellm_host::host::{Demand, Host};
+use reqwest::header::HeaderMap;
 use rstest::rstest;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,7 +20,7 @@ const UPSTREAM_HEADERS: [(&str, &str); 2] = [
 const SSE_BODY: &str = "event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 enum Seen {
-    Open(Vec<(String, String)>),
+    Open(HeaderMap),
     Deliver(Bytes),
 }
 
@@ -110,16 +111,19 @@ async fn upstream_headers_are_on_the_stream_head_before_the_first_chunk(call: Me
     let [Seen::Open(headers), chunks @ ..] = seen.as_slice() else {
         panic!("the stream opens before any chunk is delivered");
     };
-    let surfaced: Vec<(&str, &str)> = headers
+    let surfaced: Vec<(Option<&str>, Option<&str>)> = UPSTREAM_HEADERS
         .iter()
-        .filter(|(name, _)| {
-            UPSTREAM_HEADERS
-                .iter()
-                .any(|(upstream, _)| upstream == name)
+        .map(|(name, value)| {
+            (
+                headers.get(*name).and_then(|header| header.to_str().ok()),
+                Some(*value),
+            )
         })
-        .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
-    assert_eq!(surfaced, UPSTREAM_HEADERS);
+    assert!(
+        surfaced.iter().all(|(actual, expected)| actual == expected),
+        "{surfaced:?}"
+    );
     let delivered: Vec<u8> = chunks
         .iter()
         .flat_map(|step| match step {

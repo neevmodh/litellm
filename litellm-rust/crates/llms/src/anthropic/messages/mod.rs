@@ -1,3 +1,4 @@
+pub mod fake_stream_iterator;
 pub mod handler;
 pub mod headers;
 pub mod streaming_iterator;

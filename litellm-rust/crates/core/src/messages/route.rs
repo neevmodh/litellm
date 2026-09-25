@@ -8,9 +8,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use litellm_auth::SecretValue;
 use litellm_host::{
-    event::{MachineEvent, RawResponse, RequestContext, WireRequest},
-    host::{Demand, Host},
-    machine::{CallMachine, HostChannel, MachineFault},
+    event::{MachineEvent, PublicRequest, RawResponse, RequestContext, WireRequest},
+    host::{Demand, Host, Verdict},
+    machine::{CallMachine, HostChannel},
     protocol::Protocol,
 };
 use litellm_http::{Client, ClientVariant, HttpClientConfig};
@@ -33,6 +33,31 @@ use super::{
     prepare::{invalid_request, prepare_provider_request, resolve_provider},
     types::MessagesShaping,
 };
+
+pub const BODY_FIELDS: [&str; 22] = [
+    "max_tokens",
+    "metadata",
+    "stop_sequences",
+    "stream",
+    "system",
+    "temperature",
+    "thinking",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "inference_geo",
+    "top_p",
+    "mcp_servers",
+    "context_management",
+    "compaction",
+    "container",
+    "output_format",
+    "speed",
+    "output_config",
+    "cache_control",
+    "reasoning_effort",
+    "safeguards",
+];
 
 /// The caller's request as the host projects it.
 pub struct MessagesCall {
@@ -73,15 +98,6 @@ impl Protocol for Messages {
     type StreamHead = MessagesStreamHead;
 }
 
-impl From<MachineFault> for Error {
-    fn from(fault: MachineFault) -> Self {
-        Self::InvalidRequest(match fault {
-            MachineFault::Abandoned => "messages host driver was abandoned".into(),
-            MachineFault::Protocol(message) => format!("messages {message}"),
-        })
-    }
-}
-
 pub type MessagesHost = HostChannel<Messages>;
 pub type MessagesMachine = CallMachine<Messages>;
 
@@ -108,6 +124,12 @@ impl Host<Messages> for LocalMessagesHost {
             .ok_or_else(|| Error::InvalidRequest("messages request was already projected".into()))
     }
 
+    async fn open(&self, _: MessagesStreamHead) -> Result<Demand, Error> {
+        Err(Error::Unsupported(
+            "streamed responses need a streaming host",
+        ))
+    }
+
     async fn custom_op(&self, op: Infallible) -> Result<(), Error> {
         match op {}
     }
@@ -132,58 +154,130 @@ async fn execute(
     secrets: Arc<dyn SecretSource>,
 ) -> Result<MessagesOutput, Error> {
     let call = host.project().await?;
+    let caller_streams = call.body.params.stream == Some(true);
     let resolved = resolve_provider(&call.body.model, call.custom_llm_provider.as_deref())?;
+    let body_map = |body: &AnthropicMessagesRequest| -> Result<Map<String, Value>, Error> {
+        match serde_json::to_value(body).map_err(serialize_failure)? {
+            Value::Object(map) => Ok(map),
+            _ => unreachable!("a struct serializes to an object"),
+        }
+    };
+    let params = host
+        .pre_request(PublicRequest {
+            model: call.body.model.clone(),
+            custom_llm_provider: resolved.provider.as_str().to_string(),
+            messages: serde_json::to_value(&call.body.messages).map_err(serialize_failure)?,
+            params: body_map(&call.body)?
+                .into_iter()
+                .filter(|(name, _)| !matches!(name.as_str(), "model" | "messages"))
+                .collect(),
+            fields: &BODY_FIELDS,
+        })
+        .await?;
+    let patch = params
+        .into_iter()
+        .filter(|(name, _)| BODY_FIELDS.contains(&name.as_str()))
+        .collect();
+    let mut body = patched(&body_map(&call.body)?, patch);
     let secrets = secrets
         .resolve(resolved.provider.config().secret_names())
         .await?;
-    let api_key = call.api_key.clone().map(SecretValue::new);
-    let request = prepare_provider_request(call, resolved, secrets.as_ref())?;
-    let context = RequestContext {
-        model: request.body.model.clone(),
-        custom_llm_provider: request.provider.as_str().to_string(),
-        optional_params: serde_json::to_value(&request.body.params).map_err(serialize_failure)?,
-        secret_fields: Vec::new(),
-        api_key,
-    };
-    let stream = request.body.params.stream == Some(true);
-    let config = request.provider.config();
-    let body = serde_json::to_value(&request.body).map_err(serialize_failure)?;
-    let env_lookup = |key: &str| std::env::var(key).ok();
-    let authenticated = resolve_auth(&auth, request.environment, &env_lookup).await?;
-    let wire = host
-        .before_send(
-            WireRequest {
-                url: request.url,
-                headers: authenticated.headers,
-                body,
+    let mut recovered_thinking = false;
+    loop {
+        let resolved = resolve_provider(&call.body.model, call.custom_llm_provider.as_deref())?;
+        let request = prepare_provider_request(
+            MessagesCall {
+                body: messages_body(body.clone())?,
+                api_key: call.api_key.clone(),
+                api_base: call.api_base.clone(),
+                custom_llm_provider: call.custom_llm_provider.clone(),
+                extra_headers: call.extra_headers.clone(),
+                provider_specific_header: call.provider_specific_header.clone(),
+                timeout: call.timeout,
+                shaping: call.shaping.clone(),
             },
-            context,
+            resolved,
+            secrets.as_ref(),
+        )?;
+        let stream = request.body.params.stream == Some(true);
+        let context = RequestContext {
+            model: request.body.model.clone(),
+            custom_llm_provider: request.provider.as_str().to_string(),
+            optional_params: serde_json::to_value(&request.body.params).map_err(serialize_failure)?,
+            secret_fields: Vec::new(),
+            api_key: call.api_key.clone().map(SecretValue::new),
+        };
+        let config = request.provider.config();
+        let provider_name = request.provider.as_str();
+        let timeout = request.timeout;
+        let env_lookup = |key: &str| std::env::var(key).ok();
+        let authenticated = resolve_auth(&auth, request.environment, &env_lookup).await?;
+        let wire = host
+            .before_send(
+                WireRequest {
+                    url: request.url,
+                    headers: authenticated.headers,
+                    body: serde_json::to_value(&request.body).map_err(serialize_failure)?,
+                },
+                context,
+            )
+            .await?;
+        let response = send(
+            &http,
+            Authenticated {
+                headers: wire.headers,
+                signer: authenticated.signer,
+            },
+            &wire.url,
+            &wire.body,
+            timeout,
         )
         .await?;
-    let response = send(
-        &http,
-        Authenticated {
-            headers: wire.headers,
-            signer: authenticated.signer,
-        },
-        &wire.url,
-        &wire.body,
-        request.timeout,
-    )
-    .await?;
-    if !response.status().is_success() {
-        return Err(provider_error(response).await);
+        if !response.status().is_success() {
+            let error = provider_error(response).await;
+            if !recovered_thinking
+                && let Some(recovered) =
+                    super::handler::recover_thinking(&error, provider_name, &wire.body)?
+            {
+                body = recovered;
+                recovered_thinking = true;
+                continue;
+            }
+            return Err(error);
+        }
+        if stream {
+            return relay(&host, response, config.stream_decoder()).await;
+        }
+        let text = response.text().await.map_err(network)?;
+        host.emit(MachineEvent::ResponseReceived {
+            raw: RawResponse { body: text.clone() },
+        })
+        .await?;
+        let message = decode_response(config, &request.body.model, &text)?;
+        match host
+            .after_response(MessagesOutput::Message(Box::new(message)))
+            .await?
+        {
+            Verdict::Return(MessagesOutput::Message(message)) if caller_streams => {
+                return super::handler::synthesize(&host, *message).await;
+            }
+            Verdict::Return(response) => return Ok(response),
+            Verdict::Resend(patch) => body = patched(&body, patch),
+        }
     }
-    if stream {
-        return relay(&host, response, config.stream_decoder()).await;
-    }
-    let text = response.text().await.map_err(network)?;
-    host.emit(MachineEvent::ResponseReceived {
-        raw: RawResponse { body: text.clone() },
-    })
-    .await?;
-    decode_response(config, &request.body.model, &text)
-        .map(|message| MessagesOutput::Message(Box::new(message)))
+}
+
+fn patched(body: &Map<String, Value>, patch: Map<String, Value>) -> Map<String, Value> {
+    body.iter()
+        .filter(|(name, _)| !patch.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .chain(
+            patch
+                .iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
+        .collect()
 }
 
 fn serialize_failure(err: serde_json::Error) -> Error {

@@ -105,7 +105,6 @@ impl RouteError {
             | Self::HostFault(_) => false,
         }
     }
-}
 
     /// The provider's answer is what is wrong, as opposed to the request or the wire.
     pub fn is_response(&self) -> bool {

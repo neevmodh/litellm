@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use litellm_core::messages::route::{Messages, MessagesStreamHead};
+use litellm_core::messages::route::{Messages, MessagesStreamHead, messages_body};
 use litellm_host::{
     event::{PublicRequest, RequestContext, WireRequest},
     host::{Demand, Host, Verdict},
@@ -171,8 +171,11 @@ fn text_of(message: &AnthropicMessagesResponse) -> String {
 
 /// The fixture call against `api_base`, authenticated, carrying one tool and `extra`.
 fn hooked(call: MessagesCall, api_base: String, extra: Value) -> MessagesCall {
-    let body: Map<String, Value> = call
-        .body
+    let merged: Map<String, Value> = serde_json::to_value(&call.body)
+        .unwrap()
+        .as_object()
+        .cloned()
+        .unwrap()
         .into_iter()
         .chain(object(json!({"tools": [original_tool()]})))
         .chain(object(extra))
@@ -180,7 +183,7 @@ fn hooked(call: MessagesCall, api_base: String, extra: Value) -> MessagesCall {
     MessagesCall {
         api_key: Some("sk-ant".into()),
         api_base: Some(api_base),
-        body,
+        body: messages_body(merged).expect("a well-formed body"),
         ..call
     }
 }

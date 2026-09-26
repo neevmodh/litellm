@@ -205,7 +205,8 @@ async fn execute(
         let context = RequestContext {
             model: request.body.model.clone(),
             custom_llm_provider: request.provider.as_str().to_string(),
-            optional_params: serde_json::to_value(&request.body.params).map_err(serialize_failure)?,
+            optional_params: serde_json::to_value(&request.body.params)
+                .map_err(serialize_failure)?,
             secret_fields: Vec::new(),
             api_key: call.api_key.clone().map(SecretValue::new),
         };

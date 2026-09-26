@@ -11,7 +11,10 @@ use litellm_types::llms::anthropic_messages::anthropic_response::AnthropicMessag
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use super::{Error, common_utils::truncate_error_body, types::MessagesProvider};
+use super::{
+    Error,
+    common_utils::{MessagesProvider, truncate_error_body},
+};
 use crate::{constants::MESSAGES_TIMEOUT_SECS, outbound::outbound_request};
 
 pub(super) fn network(error: reqwest::Error) -> Error {

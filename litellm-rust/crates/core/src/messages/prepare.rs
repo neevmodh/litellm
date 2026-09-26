@@ -116,8 +116,6 @@ pub(super) fn prepare_provider_request(
     })
 }
 
-
-
 fn without_additional_drop_params(
     request: AnthropicMessagesRequest,
     paths: &[String],
@@ -125,7 +123,8 @@ fn without_additional_drop_params(
     if paths.is_empty() {
         return Ok(request);
     }
-    let params = serde_json::to_value(request.params).map_err(|e| Error::RequestEncoding(e.into()))?;
+    let params =
+        serde_json::to_value(request.params).map_err(|e| Error::RequestEncoding(e.into()))?;
     let trimmed = paths
         .iter()
         .fold(params, |params, path| delete_nested_value(params, path));
@@ -459,28 +458,27 @@ mod tests {
         #[case] extra: Value,
         #[case] expected: bool,
     ) {
-        let body = [
-            ("model", json!("claude-test")),
-            ("messages", json!([{"role": "user", "content": "hi"}])),
-            ("max_tokens", json!(16)),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .chain(extra.as_object().cloned().unwrap_or_default())
-        .collect();
-        let prepared = prepare(MessagesRequest {
-            model: "claude-test",
-            body,
-            api_key: Some("sk-test"),
-            api_base: Some("https://anthropic.test"),
-            custom_llm_provider: Some("anthropic"),
+        let mut fields = json!({
+            "model": "claude-test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 16
+        });
+        fields
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        let prepared = prepare(MessagesCall {
+            body: body(fields),
+            api_key: Some("sk-test".into()),
+            api_base: Some("https://anthropic.test".into()),
+            custom_llm_provider: Some("anthropic".into()),
             extra_headers: None,
             provider_specific_header: None,
             timeout: None,
             shaping,
         })
         .unwrap();
-        assert_eq!(prepared.stream, expected);
+        assert_eq!(prepared.body.params.stream.unwrap_or(false), expected);
     }
 
     #[rstest]

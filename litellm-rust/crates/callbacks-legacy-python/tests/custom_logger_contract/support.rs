@@ -14,7 +14,8 @@ use litellm_callbacks_legacy_python::{
 use litellm_core::messages::{
     Error,
     route::{
-        BODY_FIELDS, Messages, MessagesCall, MessagesOutput, MessagesStreamHead, messages_machine,
+        BODY_FIELDS, Messages, MessagesCall, MessagesOutput, MessagesStreamHead, messages_body,
+        messages_machine,
     },
     types::MessagesShaping,
 };
@@ -104,8 +105,7 @@ impl ProtocolHost for MessagesHost {
             arguments.get_item(name)
         })?;
         Ok(MessagesCall {
-            model: arguments.get_item("model")?.unwrap().extract()?,
-            body,
+            body: messages_body(body).map_err(InvokeError::Native)?,
             api_key: Some("contract-key".into()),
             api_base: Some(arguments.get_item("api_base")?.unwrap().extract()?),
             custom_llm_provider: Some("anthropic".into()),
@@ -171,7 +171,9 @@ impl Invoke {
                 self.kwargs.bind(py),
             )?,
             messages_machine(
-                &HttpClientPool::new(Arc::new(PublicDnsResolver)),
+                &litellm_core::resources::CoreResources::new(Arc::new(HttpClientPool::new(
+                    Arc::new(PublicDnsResolver),
+                ))),
                 &Resolution::from(&HttpSettings::default()).config,
                 Arc::new(NoSecrets),
             )

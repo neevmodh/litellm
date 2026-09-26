@@ -49,7 +49,7 @@ mod tests {
     ) {
         assert_eq!(name.parse::<MessagesProvider>().ok(), expected);
         if let Some(provider) = expected {
-            assert_eq!(provider.name(), name);
+            assert_eq!(provider.as_str(), name);
         }
     }
 
@@ -57,7 +57,7 @@ mod tests {
     #[case::anthropic(MessagesProvider::Anthropic, true)]
     #[case::azure_ai(MessagesProvider::AzureAi, false)]
     fn only_anthropic_streams(#[case] provider: MessagesProvider, #[case] streams: bool) {
-        assert_eq!(provider.streams(), streams);
+        assert_eq!(provider.config().stream_decoder().is_none(), streams);
     }
 
     #[rstest]

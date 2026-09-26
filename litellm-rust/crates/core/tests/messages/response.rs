@@ -172,13 +172,14 @@ async fn an_invalid_thinking_signature_retries_without_replayed_thinking(call: M
     let response = run(MessagesCall {
         api_key: Some("sk-ant".into()),
         api_base: Some(upstream.uri()),
-        body: object(json!({
+        body: messages_body(object(json!({
             "model": MODEL,
             "max_tokens": 64,
             "thinking": {"type": "enabled", "budget_tokens": 1024},
             "tools": [{"name": "lookup", "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}}}],
             "messages": history,
-        })),
+        })))
+        .unwrap(),
         ..call
     })
     .await;

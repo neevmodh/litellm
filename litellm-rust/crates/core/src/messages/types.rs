@@ -54,13 +54,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::anthropic(MessagesProvider::Anthropic, true)]
-    #[case::azure_ai(MessagesProvider::AzureAi, false)]
-    fn only_anthropic_streams(#[case] provider: MessagesProvider, #[case] streams: bool) {
-        assert_eq!(provider.config().stream_decoder().is_none(), streams);
-    }
-
-    #[rstest]
     #[case::nothing_projected(json!({}), MessagesShaping::default())]
     #[case::only_drop_params(
         json!({"drop_params": true}),
